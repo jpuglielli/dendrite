@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jpuglielli/dendrite/internal/postgres"
+	"github.com/jpuglielli/dendrite/internal/tracker"
 )
 
 // Manager handles the lifecycle of sandbox databases within a shared Postgres instance.
@@ -100,6 +101,24 @@ func (m *Manager) Create(ctx context.Context, srcDSN string, specs []postgres.Co
 		return nil, fmt.Errorf("branching into sandbox: %w", err)
 	}
 
+	// Install change-tracking triggers and metadata.
+	sbPool, err := pgxpool.New(ctx, sb.DSN)
+	if err != nil {
+		_ = m.destroyByName(ctx, name)
+		return nil, fmt.Errorf("connecting to sandbox for tracking: %w", err)
+	}
+	defer sbPool.Close()
+
+	tableNames := postgres.TableNames(specs)
+	if err := tracker.WriteMeta(ctx, sbPool, srcDSN, tableNames); err != nil {
+		_ = m.destroyByName(ctx, name)
+		return nil, fmt.Errorf("writing sandbox metadata: %w", err)
+	}
+	if err := tracker.Install(ctx, sbPool, tableNames); err != nil {
+		_ = m.destroyByName(ctx, name)
+		return nil, fmt.Errorf("installing change tracking: %w", err)
+	}
+
 	return sb, nil
 }
 
@@ -131,6 +150,24 @@ func (m *Manager) List(ctx context.Context) ([]Sandbox, error) {
 // the database and role.
 func (m *Manager) Destroy(ctx context.Context, id string) error {
 	return m.destroyByName(ctx, "sandbox_"+id)
+}
+
+// ConnectSandbox returns a pgxpool connected to the sandbox database
+// identified by the given hex ID. Uses admin credentials.
+func (m *Manager) ConnectSandbox(ctx context.Context, id string) (*pgxpool.Pool, error) {
+	cfg := m.pool.Config().ConnConfig
+	dsn := fmt.Sprintf("postgres://%s:%s@%s/sandbox_%s",
+		cfg.User, cfg.Password, net.JoinHostPort(m.host, m.port), id)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to sandbox_%s: %w", id, err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("pinging sandbox_%s: %w", id, err)
+	}
+	return pool, nil
 }
 
 // Close releases the admin connection pool.

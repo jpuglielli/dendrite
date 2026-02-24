@@ -129,6 +129,15 @@ func copyTable(ctx context.Context, srcDSN, dstDSN string, spec CopySpec) error 
 	return nil
 }
 
+// TableNames extracts the table names from a slice of CopySpecs.
+func TableNames(specs []CopySpec) []string {
+	names := make([]string, len(specs))
+	for i, s := range specs {
+		names[i] = s.Table
+	}
+	return names
+}
+
 // Branch performs a full branch operation: copies schema then selectively copies data.
 func Branch(ctx context.Context, srcDSN, dstDSN string, specs []CopySpec) error {
 	if err := CopySchema(ctx, srcDSN, dstDSN); err != nil {

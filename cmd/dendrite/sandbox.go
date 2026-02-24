@@ -19,9 +19,15 @@ func init() {
 	sandboxCreateCmd.Flags().IntVar(&sandboxProgramID, "program-id", 0, "WEBOM program ID to branch")
 	_ = sandboxCreateCmd.MarkFlagRequired("program-id")
 
+	sandboxDiffCmd.Flags().StringVar(&diffFormat, "format", "summary", "output format: summary or sql")
+	sandboxMergeCmd.Flags().BoolVar(&mergeDryRun, "dry-run", false, "print SQL without executing")
+	sandboxMergeCmd.Flags().BoolVar(&mergeForce, "force", false, "skip conflicted rows instead of aborting")
+
 	sandboxCmd.AddCommand(sandboxCreateCmd)
 	sandboxCmd.AddCommand(sandboxListCmd)
 	sandboxCmd.AddCommand(sandboxDestroyCmd)
+	sandboxCmd.AddCommand(sandboxDiffCmd)
+	sandboxCmd.AddCommand(sandboxMergeCmd)
 	rootCmd.AddCommand(sandboxCmd)
 }
 

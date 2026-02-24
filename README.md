@@ -35,6 +35,8 @@ Sandboxes create fully isolated databases (own `DATABASE` + `ROLE`) inside a sha
   │  3. REVOKE CONNECT FROM PUBLIC         │
   │  4. pg_dump schema ──► pg_restore      │
   │  5. COPY filtered data per spec        │
+  │  6. Install change-tracking triggers   │
+  │  7. Write branch metadata              │
   └────────────────────────────────────────┘
            │
            ▼
@@ -52,6 +54,38 @@ Sandboxes create fully isolated databases (own `DATABASE` + `ROLE`) inside a sha
 
 The target Postgres for sandboxes is configured via `DST_*` env vars (or `--dst` flag) — it doesn't have to be the included Compose instance.
 
+### Diff & merge
+
+Sandboxes automatically track all changes (inserts, updates, deletes) via Postgres triggers installed at creation time. You can diff those changes against the source and merge them back:
+
+```
+  dendrite sandbox diff <id>
+           │
+           ▼
+  ┌────────────────────────────────────────┐
+  │  1. Read collapsed changeset from      │
+  │     sandbox (_dendrite_changes)        │
+  │  2. Compare each changed row against   │
+  │     current source state               │
+  │  3. Report changes + conflicts         │
+  └────────────────────────────────────────┘
+
+  dendrite sandbox merge <id>
+           │
+           ▼
+  ┌────────────────────────────────────────┐
+  │  1. Compute diff (same as above)       │
+  │  2. Abort if conflicts (unless --force)│
+  │  3. Apply in REPEATABLE READ tx:       │
+  │     - DELETEs (reverse FK order)       │
+  │     - INSERTs (FK order)               │
+  │     - UPDATEs (FK order)               │
+  │  4. Retry on serialization failure     │
+  └────────────────────────────────────────┘
+```
+
+**Conflict detection:** If the source row changed since branching, the merge aborts by default. Use `--force` to skip conflicted rows, or `--dry-run` to preview the SQL without executing.
+
 ## Project structure
 
 ```
@@ -60,18 +94,25 @@ dendrite/
 │   ├── main.go            root command, DSN helpers
 │   ├── branch.go          branch — raw QUERY:TABLE branching
 │   ├── webom.go           webom — branch WEBOM data by program ID
-│   ├── sandbox.go         sandbox create/list/destroy
+│   ├── sandbox.go         sandbox create/list/destroy/diff/merge
+│   ├── merge.go           sandbox diff + merge subcommands
 │   ├── schema.go          copy-schema — schema-only copy
 │   └── temp.go            temp — branch with per-step timing
 ├── internal/
 │   ├── postgres/
 │   │   ├── conn.go        source DB connection (from .env)
-│   │   └── copy.go        CopySchema, CopyData, Branch
+│   │   └── copy.go        CopySchema, CopyData, Branch, TableNames
 │   ├── contrib/
 │   │   └── webom.go       WEBOMSpecs — FK-ordered copy specs
-│   └── sandbox/
-│       ├── manager.go     Manager — sandbox lifecycle
-│       └── manager_test.go
+│   ├── sandbox/
+│   │   ├── manager.go     Manager — sandbox lifecycle + ConnectSandbox
+│   │   └── manager_test.go
+│   ├── tracker/
+│   │   ├── tracker.go     Install triggers, ReadChanges (with collapsing)
+│   │   ├── pk.go          DiscoverPKs — PK column discovery
+│   │   └── meta.go        WriteMeta/ReadMeta — branch metadata
+│   └── merge/
+│       └── merge.go       Diff, Merge, GenerateSQL
 ├── compose.yaml           optional local Postgres
 ├── justfile               task runner
 ├── Dockerfile             multi-stage build
@@ -144,8 +185,21 @@ dendrite sandbox create --program-id 4
 # List active sandboxes
 dendrite sandbox list
 
-# Connect to a sandbox
+# Connect to a sandbox and make changes
 psql "<DSN from create output>"
+
+# See what changed (summary or SQL)
+dendrite sandbox diff <id>
+dendrite sandbox diff <id> --format sql
+
+# Preview merge without applying
+dendrite sandbox merge <id> --dry-run
+
+# Merge changes back into source
+dendrite sandbox merge <id>
+
+# Merge, skipping conflicted rows
+dendrite sandbox merge <id> --force
 
 # Destroy when done
 dendrite sandbox destroy <id>
