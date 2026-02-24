@@ -1,40 +1,29 @@
 # Dendrite
 
-Selective Postgres branching tool. Copy schema and filtered data from a production (or staging) database into lightweight local databases for development and testing.
+Selective Postgres branching tool. Copy schema and filtered data from any source Postgres database into any target — a local dev instance, a staging server, a CI ephemeral database, or an isolated sandbox.
 
 ## How it works
 
-Dendrite connects to a **source** Postgres database (via `.env`), spins up a **destination** Postgres via Docker Compose, and selectively copies schema + data using `pg_dump`/`pg_restore` and `COPY` pipelines.
+Dendrite pipes `pg_dump --schema-only` into `pg_restore` for structure, then streams filtered rows via `COPY TO` / `COPY FROM` between any two Postgres databases. No intermediate files, no full dumps — just the tables and rows you specify.
 
 ```
-┌──────────────────────┐         pg_dump / COPY TO
-│   Source Database     │────────────────────────────────┐
-│   (production/stage)  │                                │
-└──────────────────────┘                                 │
-                                                         ▼
-                                              ┌─────────────────────┐
-                                              │  pg_restore / COPY  │
-                                              │      FROM STDIN     │
-                                              └────────┬────────────┘
-                                                       │
-                           ┌───────────────────────────┬┴──────────────────────────┐
-                           ▼                           ▼                           ▼
-                 ┌──────────────────┐       ┌──────────────────┐       ┌──────────────────┐
-                 │  dendrite_dev    │       │  sandbox_a1b2... │       │  sandbox_c3d4... │
-                 │  (default dst)   │       │  (isolated)      │       │  (isolated)      │
-                 └──────────────────┘       └──────────────────┘       └──────────────────┘
-                           └───────────────────────────┬───────────────────────────┘
-                                                       │
-                                              ┌────────┴────────┐
-                                              │  Compose Postgres│
-                                              │  localhost:15432 │
-                                              │  (pgdata volume) │
-                                              └─────────────────┘
+┌─────────────────────┐                          ┌─────────────────────┐
+│   Source Database    │                          │   Target Database   │
+│   (any Postgres)     │                          │   (any Postgres)    │
+│                     │    pg_dump ──► pg_restore │                     │
+│  production         │──────────────────────────►│  local dev          │
+│  staging            │                          │  staging             │
+│  data warehouse     │   COPY TO ──► COPY FROM  │  CI ephemeral       │
+│  ...                │──────────────────────────►│  sandbox            │
+│                     │   (filtered rows only)    │  ...                │
+└─────────────────────┘                          └─────────────────────┘
 ```
+
+Source and target are configured independently — any Postgres you can connect to works for either side.
 
 ## Sandboxes
 
-Sandboxes are fully isolated databases (own `DATABASE` + `ROLE`) inside the shared Compose Postgres instance. Create, use, and destroy them without affecting anything else.
+Sandboxes create fully isolated databases (own `DATABASE` + `ROLE`) inside a shared Postgres instance. Useful when you want multiple independent environments on the same server without managing separate Postgres clusters.
 
 ```
   dendrite sandbox create --program-id 4
@@ -61,6 +50,8 @@ Sandboxes are fully isolated databases (own `DATABASE` + `ROLE`) inside the shar
   └────────────────────────────────────────┘
 ```
 
+The target Postgres for sandboxes is configured via `DST_*` env vars (or `--dst` flag) — it doesn't have to be the included Compose instance.
+
 ## Project structure
 
 ```
@@ -81,7 +72,7 @@ dendrite/
 │   └── sandbox/
 │       ├── manager.go     Manager — sandbox lifecycle
 │       └── manager_test.go
-├── compose.yaml           Postgres 17 (pgdata volume)
+├── compose.yaml           optional local Postgres
 ├── justfile               task runner
 ├── Dockerfile             multi-stage build
 └── .env                   source DB credentials (not committed)
@@ -90,26 +81,40 @@ dendrite/
 ## Prerequisites
 
 - Go 1.25+
-- Docker & Docker Compose
 - `pg_dump` / `pg_restore` / `psql` (Postgres client tools)
-- [just](https://github.com/casey/just) (task runner)
-- [golangci-lint](https://golangci-lint.run/) (for linting)
+- [just](https://github.com/casey/just) (task runner, optional)
+- [golangci-lint](https://golangci-lint.run/) (for linting, optional)
+- Docker & Docker Compose (only if using the included local Postgres)
 
-## Setup
+## Configuration
 
-1. Copy `.env.example` to `.env` and fill in your source database credentials:
-   ```
-   DB_USER=...
-   DB_PASSWORD=...
-   DB_HOST=...
-   DB_PORT=...
-   DB_NAME=...
-   ```
+### Source database
 
-2. Start the local Postgres:
-   ```
-   just up
-   ```
+Set via `.env` file (or environment variables):
+
+```
+DB_USER=...
+DB_PASSWORD=...
+DB_HOST=...
+DB_PORT=...
+DB_NAME=...
+```
+
+### Target database
+
+Set via `--dst` flag or `DST_*` environment variables:
+
+```
+DST_USER=...
+DST_PASSWORD=...
+DST_HOST=...
+DST_PORT=...
+DST_NAME=...
+```
+
+If unset, defaults to `devuser:devpass@localhost:15432/dendrite_dev` (the included Compose Postgres).
+
+A `compose.yaml` is included for convenience, but Dendrite works against any Postgres you point it at.
 
 ## Usage
 
@@ -118,48 +123,58 @@ dendrite/
 Copy schema + filtered data using `QUERY:TABLE` specs:
 
 ```sh
-just run branch "SELECT * FROM users WHERE id < 100:users"
+# Any source → any target
+dendrite branch --dst "postgres://user:pass@target:5432/mydb" \
+  "SELECT * FROM users WHERE org_id = 42:users" \
+  "SELECT * FROM orders WHERE org_id = 42:orders"
 ```
 
-### WEBOM
-
-Branch schema + WEBOM data for a program:
+### Schema only
 
 ```sh
-just run webom 4
+dendrite copy-schema --dst "postgres://user:pass@target:5432/mydb"
 ```
 
 ### Sandboxes
 
 ```sh
-# Create an isolated sandbox
-just run sandbox create --program-id 4
+# Create an isolated sandbox (branched from source)
+dendrite sandbox create --program-id 4
 
 # List active sandboxes
-just run sandbox list
+dendrite sandbox list
 
 # Connect to a sandbox
 psql "<DSN from create output>"
 
 # Destroy when done
-just run sandbox destroy <id>
+dendrite sandbox destroy <id>
+```
+
+### Local dev (with Compose)
+
+```sh
+just up                              # start local Postgres
+just run webom 4                     # branch WEBOM data into it
+just run sandbox create --program-id 4  # or create a sandbox
+just down                            # stop (keeps data)
+just nuke                            # stop + delete all data
 ```
 
 ## Just recipes
 
-| Recipe   | Description                              |
-|----------|------------------------------------------|
-| `just up`   | Start Compose Postgres                |
-| `just down` | Stop containers (keep data volume)    |
-| `just nuke` | Stop containers and delete all data   |
-| `just run`  | Run any dendrite subcommand           |
-| `just lint` | Run golangci-lint                     |
+| Recipe     | Description                            |
+|------------|----------------------------------------|
+| `just up`  | Start Compose Postgres                 |
+| `just down`| Stop containers (keep data volume)     |
+| `just nuke`| Stop containers and delete all data    |
+| `just run` | Run any dendrite subcommand            |
+| `just lint`| Run golangci-lint                      |
 
 ## Testing
 
 ```sh
-# Unit + integration tests (integration tests require `just up`)
 go test ./...
 ```
 
-Integration tests auto-skip when the Compose Postgres is not reachable.
+Integration tests auto-skip when Postgres is not reachable.
