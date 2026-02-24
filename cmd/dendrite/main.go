@@ -32,6 +32,17 @@ func main() {
 	}
 }
 
+// buildAdminDSN returns a DSN targeting the "postgres" maintenance database
+// so the sandbox manager can CREATE/DROP databases without being connected to them.
+func buildAdminDSN() string {
+	user := envOrDefault("DST_USER", "devuser")
+	pass := envOrDefault("DST_PASSWORD", "devpass")
+	host := envOrDefault("DST_HOST", "localhost")
+	port := envOrDefault("DST_PORT", "15432")
+
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/postgres", user, pass, host, port)
+}
+
 // buildDstDSN returns the destination DSN from --dst flag or DST_* env vars,
 // falling back to the local compose DB defaults.
 func buildDstDSN() string {

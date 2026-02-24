@@ -7,8 +7,13 @@ services:
       POSTGRES_USER: devuser
       POSTGRES_PASSWORD: devpass
       POSTGRES_DB: dendrite_dev
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U devuser -d dendrite_dev"]
       interval: 2s
       timeout: 5s
       retries: 5
+
+volumes:
+  pgdata:
