@@ -6,6 +6,8 @@ import (
 	"io"
 	"os/exec"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -76,54 +78,74 @@ func CopySchema(ctx context.Context, srcDSN, dstDSN string) error {
 	return nil
 }
 
-// CopyData copies rows from src to dst for each CopySpec.
-// Each spec's Query is run as COPY (query) TO STDOUT on the source,
-// and piped into COPY table FROM STDIN on the destination.
+// CopyCallback is called after each table is successfully copied.
+type CopyCallback func(spec CopySpec)
+
+// CopyData copies rows from src to dst for each CopySpec within a single
+// REPEATABLE READ transaction on the source, giving a point-in-time snapshot
+// across all tables.
 func CopyData(ctx context.Context, srcDSN, dstDSN string, specs []CopySpec) error {
-	for _, spec := range specs {
-		if err := copyTable(ctx, srcDSN, dstDSN, spec); err != nil {
-			return fmt.Errorf("copying %s: %w", spec.Table, err)
-		}
-	}
-	return nil
+	return CopyDataWithCallback(ctx, srcDSN, dstDSN, specs, nil)
 }
 
-func copyTable(ctx context.Context, srcDSN, dstDSN string, spec CopySpec) error {
-	copyOut := fmt.Sprintf(`COPY (%s) TO STDOUT`, spec.Query)
-	copyIn := fmt.Sprintf(`COPY %s FROM STDIN`, spec.Table)
+// CopyDataWithCallback is like CopyData but calls cb after each table completes.
+func CopyDataWithCallback(ctx context.Context, srcDSN, dstDSN string, specs []CopySpec, cb CopyCallback) error {
+	srcConn, err := pgx.Connect(ctx, srcDSN)
+	if err != nil {
+		return fmt.Errorf("connecting to source: %w", err)
+	}
+	defer srcConn.Close(ctx) //nolint:errcheck
 
-	src := exec.CommandContext(ctx, "psql", srcDSN, "-c", copyOut)
-	dst := exec.CommandContext(ctx, "psql", dstDSN, "-c", copyIn)
+	tx, err := srcConn.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	for _, spec := range specs {
+		if err := copyTablePgx(ctx, tx.Conn().PgConn(), dstDSN, spec); err != nil {
+			return fmt.Errorf("copying %s: %w", spec.Table, err)
+		}
+		if cb != nil {
+			cb(spec)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// copyTablePgx copies a single table using pgx's native COPY protocol.
+// srcPgConn must be inside the caller's transaction.
+func copyTablePgx(ctx context.Context, srcPgConn *pgconn.PgConn, dstDSN string, spec CopySpec) error {
+	dstConn, err := pgx.Connect(ctx, dstDSN)
+	if err != nil {
+		return fmt.Errorf("connecting to destination: %w", err)
+	}
+	defer dstConn.Close(ctx) //nolint:errcheck
+
+	copyOutSQL := fmt.Sprintf(`COPY (%s) TO STDOUT`, spec.Query)
+	copyInSQL := fmt.Sprintf(`COPY %s FROM STDIN`, spec.Table)
 
 	pr, pw := io.Pipe()
-	src.Stdout = pw
-	dst.Stdin = pr
-
-	var srcStderr, dstStderr []byte
-	src.Stderr = &errWriter{buf: &srcStderr}
-	dst.Stderr = &errWriter{buf: &dstStderr}
-
-	if err := src.Start(); err != nil {
-		return fmt.Errorf("starting COPY TO: %w", err)
-	}
-	if err := dst.Start(); err != nil {
-		return fmt.Errorf("starting COPY FROM: %w", err)
-	}
 
 	srcDone := make(chan error, 1)
 	go func() {
-		srcDone <- src.Wait()
-		_ = pw.Close()
+		_, err := srcPgConn.CopyTo(ctx, pw, copyOutSQL)
+		pw.CloseWithError(err) // signal EOF (or error) to the reader
+		srcDone <- err
 	}()
 
-	dstErr := dst.Wait()
+	_, dstErr := dstConn.PgConn().CopyFrom(ctx, pr, copyInSQL)
 	srcErr := <-srcDone
 
 	if srcErr != nil {
-		return fmt.Errorf("COPY TO failed: %w\nstderr: %s", srcErr, srcStderr)
+		return fmt.Errorf("COPY TO failed: %w", srcErr)
 	}
 	if dstErr != nil {
-		return fmt.Errorf("COPY FROM failed: %w\nstderr: %s", dstErr, dstStderr)
+		return fmt.Errorf("COPY FROM failed: %w", dstErr)
 	}
 
 	return nil

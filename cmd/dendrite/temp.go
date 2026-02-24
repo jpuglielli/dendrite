@@ -45,13 +45,13 @@ var tempCmd = &cobra.Command{
 		}
 		fmt.Printf("[copy-schema]  %s\n", time.Since(t))
 
-		// Copy data per spec
-		for _, spec := range specs {
-			t = time.Now()
-			if err := postgres.CopyData(ctx, srcDSN, dstDSN, []postgres.CopySpec{spec}); err != nil {
-				return fmt.Errorf("data copy failed for %s: %w", spec.Table, err)
-			}
-			fmt.Printf("[copy-data]    %-30s %s\n", spec.Table, time.Since(t))
+		// Copy data (all tables in a single REPEATABLE READ snapshot)
+		tableStart := time.Now()
+		if err := postgres.CopyDataWithCallback(ctx, srcDSN, dstDSN, specs, func(spec postgres.CopySpec) {
+			fmt.Printf("[copy-data]    %-30s %s\n", spec.Table, time.Since(tableStart))
+			tableStart = time.Now()
+		}); err != nil {
+			return fmt.Errorf("data copy failed: %w", err)
 		}
 
 		fmt.Printf("[total]        %s\n", time.Since(total))

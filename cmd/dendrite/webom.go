@@ -48,12 +48,12 @@ var webomCmd = &cobra.Command{
 		}
 		fmt.Printf("[copy-schema]  %s\n", time.Since(t))
 
-		for _, spec := range specs {
-			t = time.Now()
-			if err := postgres.CopyData(ctx, srcDSN, dstDSN, []postgres.CopySpec{spec}); err != nil {
-				return fmt.Errorf("copy failed for %s: %w", spec.Table, err)
-			}
-			fmt.Printf("[copy-data]    %-35s %s\n", spec.Table, time.Since(t))
+		tableStart := time.Now()
+		if err := postgres.CopyDataWithCallback(ctx, srcDSN, dstDSN, specs, func(spec postgres.CopySpec) {
+			fmt.Printf("[copy-data]    %-35s %s\n", spec.Table, time.Since(tableStart))
+			tableStart = time.Now()
+		}); err != nil {
+			return fmt.Errorf("data copy failed: %w", err)
 		}
 
 		fmt.Printf("[total]        %s\n", time.Since(total))
