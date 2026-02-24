@@ -1,0 +1,5 @@
+.git
+.env
+.githooks
+*.md
+docker-compose.yml

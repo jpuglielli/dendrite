@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:17-alpine
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_USER: devuser
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: dendrite_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devuser -d dendrite_dev"]
+      interval: 2s
+      timeout: 5s
+      retries: 5

@@ -1,3 +1,12 @@
 [working-directory: "."]
-run:
-    go run cmd/main.go
+run *ARGS:
+    go run ./cmd/dendrite {{ARGS}}
+
+lint:
+    golangci-lint run ./...
+
+up:
+    docker compose up -d --wait
+
+down:
+    docker compose down --volumes --remove-orphans
